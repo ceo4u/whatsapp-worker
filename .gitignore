@@ -5,6 +5,12 @@ venv/
 .venv/
 __pycache__/
 *.pyc
+*.pyo
 *.log
 .passenger/
 tmp/
+.DS_Store
+Thumbs.db
+*.sqlite
+.idea/
+.vscode/
