@@ -1,5 +1,7 @@
 import sys
 import os
+import threading
+import asyncio
 
 # Set base directory
 app_dir = os.path.dirname(os.path.abspath(__file__))
@@ -17,27 +19,41 @@ for p in potential_venvs:
     if os.path.exists(p) and p not in sys.path:
         sys.path.insert(0, p)
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv(os.path.join(app_dir, '.env'))
+from dotenv import load_dotenv
+load_dotenv(os.path.join(app_dir, '.env'))
 
-    from a2wsgi import ASGIMiddleware
-    from main import app
+from main import app
 
-    application = ASGIMiddleware(app)
+# Fork-safe WSGI runner for LiteSpeed / Passenger
+_lock = threading.Lock()
+_middleware = None
+_thread = None
 
-except Exception:
-    import traceback
-    err_msg = traceback.format_exc()
+def get_middleware():
+    global _middleware, _thread
+    # When LiteSpeed forks a worker, background threads from the parent process DIE!
+    # Checking `not _thread.is_alive()` ensures a healthy event loop thread in every forked child.
+    if _middleware is None or _thread is None or not _thread.is_alive():
+        with _lock:
+            if _middleware is None or _thread is None or not _thread.is_alive():
+                loop = asyncio.new_event_loop()
+                _thread = threading.Thread(target=loop.run_forever, daemon=True)
+                _thread.start()
+                from a2wsgi import ASGIMiddleware
+                _middleware = ASGIMiddleware(app, loop=loop)
+    return _middleware
 
-    # Log to file for easy debugging
+def application(environ, start_response):
     try:
-        with open(os.path.join(app_dir, "startup_error.log"), "w") as f:
-            f.write(err_msg)
+        mw = get_middleware()
+        return mw(environ, start_response)
     except Exception:
-        pass
-
-    # Instant response instead of hanging / timeout
-    def application(environ, start_response):
+        import traceback
+        err_msg = traceback.format_exc()
+        try:
+            with open(os.path.join(app_dir, "startup_error.log"), "w") as f:
+                f.write(err_msg)
+        except Exception:
+            pass
         start_response('500 Internal Server Error', [('Content-Type', 'text/plain; charset=utf-8')])
-        return [f"WSGI Startup Error:\n\n{err_msg}".encode("utf-8")]
+        return [f"WSGI Runtime Error:\n\n{err_msg}".encode("utf-8")]
