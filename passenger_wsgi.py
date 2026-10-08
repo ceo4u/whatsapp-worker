@@ -31,8 +31,6 @@ _thread = None
 
 def get_middleware():
     global _middleware, _thread
-    # When LiteSpeed forks a worker, background threads from the parent process DIE!
-    # Checking `not _thread.is_alive()` ensures a healthy event loop thread in every forked child.
     if _middleware is None or _thread is None or not _thread.is_alive():
         with _lock:
             if _middleware is None or _thread is None or not _thread.is_alive():
@@ -44,9 +42,16 @@ def get_middleware():
     return _middleware
 
 def application(environ, start_response):
+    # Pure WSGI instant health-check route (bypass ASGI/a2wsgi)
+    path = environ.get('PATH_INFO', '').rstrip('/')
+    if path == '/ping':
+        start_response('200 OK', [('Content-Type', 'application/json')])
+        return [b'{"status":"ok","mode":"pure_wsgi"}']
+
     try:
         mw = get_middleware()
-        return mw(environ, start_response)
+        # list() forces immediate consumption of the generator for LiteSpeed
+        return list(mw(environ, start_response))
     except Exception:
         import traceback
         err_msg = traceback.format_exc()
